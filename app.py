@@ -15,7 +15,7 @@ def hash_password(password):
 
 # --- 資料庫初始化 ---
 def init_database():
-    conn = sqlite3.connect('construction_reports_v7.db', check_same_thread=False)
+    conn = sqlite3.connect('construction_reports_v6.db', check_same_thread=False)
     c = conn.cursor()
     
     c.execute('''CREATE TABLE IF NOT EXISTS users (
