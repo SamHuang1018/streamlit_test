@@ -7,7 +7,7 @@ from datetime import datetime
 import hashlib
 
 # --- 設定頁面 ---
-st.set_page_config(page_title="測試", layout="wide")
+st.set_page_config(page_title="工程日報與利潤分析系統", layout="wide")
 
 # --- 密碼加密 ---
 def hash_password(password):
@@ -1173,7 +1173,7 @@ if 'logged_in' not in st.session_state:
     st.session_state.role = None
 
 if not st.session_state.logged_in:
-    st.title("測試 - 登入")
+    st.title("工程日報與利潤分析系統 - 登入")
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
         with st.form("login_form"):
