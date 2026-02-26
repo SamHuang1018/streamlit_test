@@ -1150,13 +1150,17 @@ else:
                 st.write("---")
                 
                 # 整體績效
-                st.write("整體績效概覽（依日報逐筆加總）")
-                cm1, cm2, cm3, cm4 = st.columns(4)
-                cm1.metric("日報總產值", f"${df['產值'].sum():,.0f}")
-                cm2.metric("日報人力成本", f"${df['人力成本'].sum():,.0f}")
-                cm3.metric("日報材料成本", f"${df['材料成本'].sum():,.0f}")
-                cm4.metric("日報總利潤", f"${df['利潤'].sum():,.0f}")
-                st.caption("⚠️ 上方為每筆日報的加總（施工中天數利潤為負），樓層實際利潤請看上方統計表。")
+                if filter_project_view != "全部" and floor_df is not None and not floor_df.empty:
+                    st.write("整體績效")
+                    all_rev = floor_df['累計產值'].sum()
+                    all_labor = floor_df['累計工成本'].sum()
+                    all_mat = sum(mat_cost_map.values())
+                    all_profit = all_rev - all_labor - all_mat
+                    cm1, cm2, cm3, cm4 = st.columns(4)
+                    cm1.metric("總產值", f"${all_rev:,.0f}")
+                    cm2.metric("人力成本", f"${all_labor:,.0f}")
+                    cm3.metric("材料成本", f"${all_mat:,.0f}")
+                    cm4.metric("總利潤", f"${all_profit:,.0f}")
                 
                 st.write("---")
 
