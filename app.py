@@ -794,13 +794,17 @@ def render_report_form(is_editing, edit_data=None):
                         continue
                     else:
                         continue
-
+                        
                 if checked or item_is_locked:
-                    revenue = qty * unit_price
-                    rt_total_qty += qty; rt_total_workers += item_workers; rt_total_revenue += revenue
-                    selected_items.append({
-                        'item_name': item_name, 'quantity': qty, 'unit': unit, 'unit_price': unit_price,
-                        'revenue': revenue, 'completion_days': 1.0, 'worker_count': item_workers, 'is_custom': False})
+                    if 'is_prep' in dir() and is_prep:
+                        qty = 0.0
+                        revenue = 0.0
+                    else:
+                        revenue = qty * unit_price
+                        rt_total_qty += qty; rt_total_workers += item_workers; rt_total_revenue += revenue
+                        selected_items.append({
+                            'item_name': item_name, 'quantity': qty, 'unit': unit, 'unit_price': unit_price,
+                            'revenue': revenue, 'completion_days': 1.0, 'worker_count': item_workers, 'is_custom': False})
         else:
             st.info(f"{reference_floor} 尚未設定標準項目")
 
