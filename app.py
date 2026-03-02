@@ -1,5 +1,4 @@
 import re
-import json
 import sqlite3
 import pandas as pd
 import streamlit as st
@@ -789,22 +788,21 @@ def render_report_form(is_editing, edit_data=None):
                         with col_workers:
                             item_workers = st.number_input("投入工數", min_value=0.0, value=float(default_workers),
                                 step=0.5, key=f"workers_{item_name}_{report_id}", label_visibility="collapsed")
-                        qty = float(default_qty)
+                        qty = 0.0 if is_prep else float(default_qty)
                     elif item_is_locked:
                         continue
                     else:
                         continue
-                        
+
                 if checked or item_is_locked:
-                    if 'is_prep' in dir() and is_prep:
+                    # 只要是施工中，數量一律歸零，避免 Streamlit 暫存值累加
+                    if not item_is_locked and is_prep:
                         qty = 0.0
-                        revenue = 0.0
-                    else:
-                        revenue = qty * unit_price
-                        rt_total_qty += qty; rt_total_workers += item_workers; rt_total_revenue += revenue
-                        selected_items.append({
-                            'item_name': item_name, 'quantity': qty, 'unit': unit, 'unit_price': unit_price,
-                            'revenue': revenue, 'completion_days': 1.0, 'worker_count': item_workers, 'is_custom': False})
+                    revenue = qty * unit_price
+                    rt_total_qty += qty; rt_total_workers += item_workers; rt_total_revenue += revenue
+                    selected_items.append({
+                        'item_name': item_name, 'quantity': qty, 'unit': unit, 'unit_price': unit_price,
+                        'revenue': revenue, 'completion_days': 1.0, 'worker_count': item_workers, 'is_custom': False})
         else:
             st.info(f"{reference_floor} 尚未設定標準項目")
 
@@ -1150,17 +1148,13 @@ else:
                 st.write("---")
                 
                 # 整體績效
-                if filter_project_view != "全部" and floor_df is not None and not floor_df.empty:
-                    st.write("整體績效")
-                    all_rev = floor_df['累計產值'].sum()
-                    all_labor = floor_df['累計工成本'].sum()
-                    all_mat = sum(mat_cost_map.values())
-                    all_profit = all_rev - all_labor - all_mat
-                    cm1, cm2, cm3, cm4 = st.columns(4)
-                    cm1.metric("總產值", f"${all_rev:,.0f}")
-                    cm2.metric("人力成本", f"${all_labor:,.0f}")
-                    cm3.metric("材料成本", f"${all_mat:,.0f}")
-                    cm4.metric("總利潤", f"${all_profit:,.0f}")
+                st.write("整體績效概覽（依日報逐筆加總）")
+                cm1, cm2, cm3, cm4 = st.columns(4)
+                cm1.metric("日報總產值", f"${df['產值'].sum():,.0f}")
+                cm2.metric("日報人力成本", f"${df['人力成本'].sum():,.0f}")
+                cm3.metric("日報材料成本", f"${df['材料成本'].sum():,.0f}")
+                cm4.metric("日報總利潤", f"${df['利潤'].sum():,.0f}")
+                st.caption("⚠️ 上方為每筆日報的加總（施工中天數利潤為負），樓層實際利潤請看上方統計表。")
                 
                 st.write("---")
 
