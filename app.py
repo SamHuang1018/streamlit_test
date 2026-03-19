@@ -465,30 +465,33 @@ def delete_extra_work_item(project_name, item_name):
              (project_name, item_name))
     conn.commit()
 
-def get_item_prior_in_progress_cost(project_name, building_name, floor_name, item_name, wage, exclude_report_id=None):
-    """查詢同一棟別+樓層+工項在過去「施工中」(qty=0)記錄的累積工成本及材料成本。"""
+def get_floor_prior_labor_cost(project_name, building_name, floor_name, item_names, wage, exclude_report_id=None):
+    """
+    [v7.1] 查詢同樓層+相同工項的所有過去日報，用 report 層級 worker_count 累加工成本。
+    用 DISTINCT report_id 避免同一天多個工項重複計算。
+    不再依賴 item 層級的 worker_count 或 qty=0 判斷。
+    """
+    if not item_names:
+        return 0
     c = conn.cursor()
-    query = '''
-        SELECT ri.worker_count, r.worker_count as report_workers, r.material_cost
-        FROM report_items ri
-        JOIN reports r ON ri.report_id = r.report_id
+    placeholders = ','.join(['?' for _ in item_names])
+    query = f'''
+        SELECT DISTINCT r.report_id, r.worker_count
+        FROM reports r
+        JOIN report_items ri ON r.report_id = ri.report_id
         WHERE r.project_name = ? AND r.building_name = ?
         AND (r.floor_name = ? OR r.floor_name LIKE ? OR r.floor_name LIKE ? OR r.floor_name LIKE ?)
-        AND ri.item_name = ? AND ri.quantity = 0 AND ri.worker_count > 0
+        AND ri.item_name IN ({placeholders})
     '''
-    params = [project_name, building_name, floor_name, f'{floor_name},%', f'%, {floor_name}', f'%, {floor_name},%', item_name]
+    params = [project_name, building_name,
+              floor_name, f'{floor_name},%', f'%, {floor_name}', f'%, {floor_name},%']
+    params.extend(item_names)
     if exclude_report_id:
         query += ' AND r.report_id != ?'
         params.append(exclude_report_id)
     c.execute(query, params)
     rows = c.fetchall()
-    accumulated_labor = 0
-    accumulated_material = 0
-    for item_wc, report_total_wc, mat_cost in rows:
-        accumulated_labor += item_wc * wage
-        if report_total_wc and report_total_wc > 0 and mat_cost:
-            accumulated_material += mat_cost * (item_wc / report_total_wc)
-    return accumulated_labor, accumulated_material
+    return sum(wc * wage for _, wc in rows if wc)
 
 # --- 日報表操作函數 ---
 def save_report(report_data, items, materials, photos=None):
@@ -951,58 +954,35 @@ def render_report_form(is_editing, edit_data=None):
                 
                 wage = get_project_wage(selected_project)
                 
-                # ===== [v7 核心修正] 區分完成/施工中的工數成本 =====
-                labor_cost = actual_worker_count * wage  # 全部工數（帳務記錄用）
+                # ===== [v7.1 核心修正] 用 report 層級工數計算 =====
+                labor_cost = actual_worker_count * wage  # 今日全部工數（report 層級）
                 total_revenue = rt_total_revenue
                 total_mat_cost = sum(mat['cost'] for mat in selected_materials)
-                
-                # [v7] 只有「已完成項目」的工數成本會扣利潤
-                completed_workers = sum(
-                    item['worker_count'] for item in selected_items if item['quantity'] > 0
-                )
-                completed_labor_cost = completed_workers * wage
-                
-                # [v7] 施工中項目的工數（記錄用，不扣利潤）
-                in_progress_workers = sum(
-                    item['worker_count'] for item in selected_items
-                    if item['quantity'] == 0 and item['worker_count'] > 0
-                )
-                in_progress_labor_cost = in_progress_workers * wage
-                
-                total_cost = labor_cost + total_mat_cost  # 總成本仍記錄全部
+                total_cost = labor_cost + total_mat_cost
                 total_qty = rt_total_qty
-                
-                # [v7] 工率用完成項目工數
-                if completed_workers > 0:
-                    efficiency = total_qty / completed_workers
-                elif actual_worker_count > 0:
-                    efficiency = total_qty / actual_worker_count
-                else:
-                    efficiency = 0
+                efficiency = total_qty / actual_worker_count if actual_worker_count > 0 else 0
 
-                # ===== [v7] 利潤計算 =====
-                # [v7] 標準+自訂項目都算「已完成」
-                has_completed_item = any(
-                    item['quantity'] > 0
-                    for item in selected_items
-                )
+                has_completed_item = any(item['quantity'] > 0 for item in selected_items)
                 current_edit_report_id = report_id if is_editing else None
 
-                total_accumulated_prior = 0
-                if has_completed_item and reference_floor:
-                    for item in selected_items:
-                        if not item.get('is_custom', False) and item['quantity'] > 0:
-                            prior_labor, prior_mat = get_item_prior_in_progress_cost(
-                                selected_project, selected_building, reference_floor,
-                                item['item_name'], wage,
-                                exclude_report_id=current_edit_report_id
-                            )
-                            total_accumulated_prior += prior_labor + prior_mat
+                # [v7.1] 收集已完成的標準項目名稱
+                completed_std_items = [
+                    item['item_name'] for item in selected_items
+                    if item['quantity'] > 0 and not item.get('is_custom', False)
+                ]
 
-                # [v7] 利潤 = 產值 - 完成工成本 - 材料 - 前期累積
-                # 施工中項目的工成本「不」扣利潤
+                # [v7.1] 查詢前期所有同樓層+同工項日報的 report 層級工成本
+                total_accumulated_prior = 0
+                if has_completed_item and reference_floor and completed_std_items:
+                    total_accumulated_prior = get_floor_prior_labor_cost(
+                        selected_project, selected_building, reference_floor,
+                        completed_std_items, wage,
+                        exclude_report_id=current_edit_report_id
+                    )
+
+                # [v7.1] 利潤 = 產值 - 今日工成本(report層級) - 前期累積工成本 - 材料
                 if has_completed_item:
-                    profit = total_revenue - completed_labor_cost - total_mat_cost - total_accumulated_prior
+                    profit = total_revenue - labor_cost - total_accumulated_prior - total_mat_cost
                 else:
                     profit = 0
 
@@ -1041,32 +1021,24 @@ def render_report_form(is_editing, edit_data=None):
                     save_report(report_data, selected_items, selected_materials, photo_list if photo_list else None)
                     st.success("日報表已提交成功！")
                 
-                # [v7] 改進的提交結果顯示
+                # [v7.1] 提交結果顯示
                 if current_role == 'admin':
-                    col_s1, col_s2, col_s3, col_s4, col_s5 = st.columns(5)
+                    col_s1, col_s2, col_s3, col_s4 = st.columns(4)
                     col_s1.metric("產值", f"${total_revenue:,.0f}")
-                    col_s2.metric("完成項目工成本", f"${completed_labor_cost:,.0f}",
-                                 help=f"完成項目工數 {completed_workers:.1f} × 日薪 ${wage}")
-                    if in_progress_workers > 0:
-                        col_s3.metric("施工中工成本", f"${in_progress_labor_cost:,.0f}",
-                                     help=f"施工中工數 {in_progress_workers:.1f} × 日薪 ${wage}（不扣利潤）")
-                    else:
-                        col_s3.metric("施工中工成本", "$0", help="無施工中項目")
-                    if total_accumulated_prior > 0:
-                        col_s4.metric("累積前期成本", f"${total_accumulated_prior:,.0f}", help="施工中各天的工+料成本合計")
-                    else:
-                        col_s4.metric("累積前期成本", "$0")
-                    col_s5.metric("實際利潤", f"${profit:,.0f}")
+                    col_s2.metric("今日工成本", f"${labor_cost:,.0f}",
+                                 help=f"今日 {actual_worker_count:.1f} 工 × 日薪 ${wage}")
+                    col_s3.metric("前期累積工成本", f"${total_accumulated_prior:,.0f}",
+                                 help="同樓層+同工項過去日報的工成本合計")
+                    col_s4.metric("實際利潤", f"${profit:,.0f}")
                     
                     if has_completed_item:
+                        total_all_labor = labor_cost + total_accumulated_prior
                         st.caption(
-                            f"💡 利潤計算：${total_revenue:,.0f}(產值) - ${completed_labor_cost:,.0f}(完成工成本) "
-                            f"- ${total_mat_cost:,.0f}(材料) - ${total_accumulated_prior:,.0f}(前期累積) "
-                            f"= ${profit:,.0f}")
-                        if in_progress_workers > 0:
-                            st.caption(f"⚠️ 施工中工成本 ${in_progress_labor_cost:,.0f} 已記錄但不扣除利潤，待完工時再計入")
+                            f"💡 利潤 = ${total_revenue:,.0f}(產值) - ${total_all_labor:,.0f}(總工成本: "
+                            f"今日${labor_cost:,.0f} + 前期${total_accumulated_prior:,.0f}) "
+                            f"- ${total_mat_cost:,.0f}(材料) = ${profit:,.0f}")
                     else:
-                        st.caption("ℹ️ 全部項目施工中，尚未計算利潤。工成本已記錄，待完工時扣除。")
+                        st.caption(f"ℹ️ 施工中，工成本 ${labor_cost:,.0f} 已記錄，待完工時扣除利潤。")
                 else:
                     st.info("資料已上傳，待管理員審核計算數量。")
                 
@@ -1300,8 +1272,7 @@ else:
                                 if save_submitted:
                                     new_items_list = []
                                     total_revenue = 0; total_item_workers = 0; total_qty = 0
-                                    # [v7] 區分完成/施工中工數
-                                    completed_item_workers = 0
+                                    # [v7.1] 利潤改用 report 層級工成本
                                     for _, item_row in edited_items_df.iterrows():
                                         q = float(item_row['數量']) if item_row['數量'] else 0
                                         p = float(item_row['單價']) if item_row['單價'] else 0
@@ -1312,7 +1283,7 @@ else:
                                             'unit_price': p, 'revenue': rev, 'completion_days': 1.0,
                                             'worker_count': wc, 'is_custom': item_row.get('is_custom', False)})
                                         total_revenue += rev; total_item_workers += wc; total_qty += q
-                                        if q > 0: completed_item_workers += wc  # [v7]
+
 
                                     new_materials_list = []; total_mat_cost = 0
                                     for _, mat_row in edited_materials_df.iterrows():
@@ -1328,24 +1299,19 @@ else:
                                     labor_cost = actual_worker_count * wage
                                     total_cost = labor_cost + total_mat_cost
                                     
-                                    # [v7] 利潤只扣完成項目的工數成本
-                                    completed_labor = completed_item_workers * wage
+                                    # [v7.1] 用 report 層級工成本
                                     has_completed = any(item['quantity'] > 0 for item in new_items_list)
+                                    completed_std = [item['item_name'] for item in new_items_list
+                                                    if item['quantity'] > 0 and not item.get('is_custom', False)]
                                     total_prior = 0
-                                    if has_completed:
-                                        for item in new_items_list:
-                                            if not item.get('is_custom', False) and item['quantity'] > 0:
-                                                prior_l, prior_m = get_item_prior_in_progress_cost(
-                                                    project, building, new_floor, item['item_name'], wage, exclude_report_id=report_id)
-                                                total_prior += prior_l + prior_m
-                                        profit = total_revenue - completed_labor - total_mat_cost - total_prior
+                                    if has_completed and completed_std:
+                                        total_prior = get_floor_prior_labor_cost(
+                                            project, building, new_floor, completed_std, wage, exclude_report_id=report_id)
+                                        profit = total_revenue - labor_cost - total_prior - total_mat_cost
                                     else:
                                         profit = 0; total_prior = 0
                                     
-                                    # [v7] 工率用完成工數
-                                    if completed_item_workers > 0: efficiency = total_qty / completed_item_workers
-                                    elif actual_worker_count > 0: efficiency = total_qty / actual_worker_count
-                                    else: efficiency = 0
+                                    efficiency = total_qty / actual_worker_count if actual_worker_count > 0 else 0
 
                                     update_data = {
                                         'date': new_date.strftime("%Y-%m-%d"), 'project_name': project,
@@ -1356,7 +1322,7 @@ else:
                                         'total_cost': total_cost, 'profit': profit, 'efficiency': efficiency,
                                         'accumulated_prior_cost': total_prior}
                                     update_report(report_id, update_data, new_items_list, new_materials_list, photos=None)
-                                    st.success(f"已更新！利潤：${profit:,.0f}（完成工成本：${completed_labor:,.0f}，前期累積：${total_prior:,.0f}）")
+                                    st.success(f"已更新！利潤：${profit:,.0f}（今日工成本：${labor_cost:,.0f}，前期累積：${total_prior:,.0f}）")
                                     st.rerun()
 
                                 if delete_submitted:
