@@ -1174,26 +1174,42 @@ else:
                 mat_stats_query = '''SELECT r.building_name, r.floor_name, SUM(rm.quantity * rm.unit_price) as total_mat_cost
                     FROM reports r JOIN report_materials rm ON r.report_id = rm.report_id WHERE 1=1'''
                 mat_params = []
+                # [fix] 用 report 層級工數計算樓層總工數（避免 item 層級 worker_count=0 的問題）
+                report_workers_query = '''SELECT sub.building_name, sub.floor_name, SUM(sub.wc) as total_report_workers
+                    FROM (SELECT DISTINCT r.report_id, r.building_name, r.floor_name, r.worker_count as wc
+                          FROM reports r WHERE 1=1 {cond}) sub
+                    GROUP BY sub.building_name, sub.floor_name'''
+                rw_params = []
                 filter_cond = ""
                 if filter_project_view != "全部":
-                    filter_cond += " AND r.project_name = ?"; floor_params.append(filter_project_view); mat_params.append(filter_project_view)
+                    filter_cond += " AND r.project_name = ?"; floor_params.append(filter_project_view); mat_params.append(filter_project_view); rw_params.append(filter_project_view)
                 if filter_building_view != "全部":
-                    filter_cond += " AND r.building_name = ?"; floor_params.append(filter_building_view); mat_params.append(filter_building_view)
+                    filter_cond += " AND r.building_name = ?"; floor_params.append(filter_building_view); mat_params.append(filter_building_view); rw_params.append(filter_building_view)
                 if date_from:
-                    filter_cond += " AND r.date >= ?"; floor_params.append(date_from.strftime("%Y-%m-%d")); mat_params.append(date_from.strftime("%Y-%m-%d"))
+                    d_from = date_from.strftime("%Y-%m-%d")
+                    filter_cond += " AND r.date >= ?"; floor_params.append(d_from); mat_params.append(d_from); rw_params.append(d_from)
                 if date_to:
-                    filter_cond += " AND r.date <= ?"; floor_params.append(date_to.strftime("%Y-%m-%d")); mat_params.append(date_to.strftime("%Y-%m-%d"))
+                    d_to = date_to.strftime("%Y-%m-%d")
+                    filter_cond += " AND r.date <= ?"; floor_params.append(d_to); mat_params.append(d_to); rw_params.append(d_to)
                 floor_stats_query += filter_cond + " GROUP BY r.building_name, r.floor_name, ri.item_name ORDER BY r.building_name, r.floor_name, ri.item_name"
                 mat_stats_query += filter_cond + " GROUP BY r.building_name, r.floor_name"
+                report_workers_query = report_workers_query.format(cond=filter_cond)
                 c = conn.cursor()
                 c.execute(floor_stats_query, floor_params); floor_data = c.fetchall()
                 c.execute(mat_stats_query, mat_params); mat_data = c.fetchall()
+                c.execute(report_workers_query, rw_params); rw_data = c.fetchall()
                 mat_cost_map = {(b, f): cost for b, f, cost in mat_data}
+                report_workers_map = {(b, f): wc for b, f, wc in rw_data}
 
                 if floor_data:
                     floor_df = pd.DataFrame(floor_data, columns=['棟別', '樓層', '工項', '單位', '數量(MAX)', '累計工數', '單價', '施工中數', 'is_custom'])
                     floor_df['累計產值'] = floor_df['數量(MAX)'] * floor_df['單價']
-                    current_wage = get_project_wage(filter_project_view) if filter_project_view != "全部" else 0
+                    if filter_project_view != "全部":
+                        current_wage = get_project_wage(filter_project_view)
+                    else:
+                        all_wages = [get_project_wage(p) for p in project_names]
+                        current_wage = int(sum(all_wages) / len(all_wages)) if all_wages else 2500
+                        st.caption(f"⚠️ 顯示所有案場，人工成本以平均日薪 ${current_wage:,} 估算。建議篩選特定案場以獲得精確數字。")
                     floor_df['預估人力成本'] = floor_df['累計工數'] * current_wage
                     floor_df['項目利潤(僅扣工)'] = floor_df['累計產值'] - floor_df['預估人力成本']
                     floor_df['狀態'] = floor_df.apply(lambda x: "✅ 已完成" if x['數量(MAX)'] > 0 else "🔄 施工中", axis=1)
@@ -1210,19 +1226,24 @@ else:
                                         "累計工數": st.column_config.NumberColumn(format="%.1f"),
                                         "數量(MAX)": st.column_config.NumberColumn(format="%.1f", label="數量")},
                                     use_container_width=True, hide_index=True)
-                                f_rev = floor_item_data['累計產值'].sum(); f_labor_cost = floor_item_data['預估人力成本'].sum()
-                                f_workers = floor_item_data['累計工數'].sum(); f_qty_sum = floor_item_data['數量(MAX)'].sum()
+                                f_rev = floor_item_data['累計產值'].sum(); f_qty_sum = floor_item_data['數量(MAX)'].sum()
+                                # [fix] 用 report 層級工數計算人工成本（item 層級 worker_count 可能為 0）
+                                f_report_workers = report_workers_map.get((building, floor), 0)
+                                f_labor_cost = f_report_workers * current_wage
                                 f_mat_cost = mat_cost_map.get((building, floor), 0)
                                 f_total_profit = f_rev - f_labor_cost - f_mat_cost
-                                f_efficiency = f_qty_sum / f_workers if f_workers > 0 else 0
+                                f_efficiency = f_qty_sum / f_report_workers if f_report_workers > 0 else 0
                                 c1, c2, c3, c4, c5 = st.columns(5)
                                 c1.metric("樓層總產值", f"${f_rev:,.0f}")
-                                c2.metric("總人工成本", f"${f_labor_cost:,.0f}", help=f"總工數 {f_workers} x 日薪 {current_wage}")
+                                c2.metric("總人工成本", f"${f_labor_cost:,.0f}", help=f"總工數 {f_report_workers:.1f} x 日薪 {current_wage}")
                                 c3.metric("總材料成本", f"${f_mat_cost:,.0f}")
                                 c4.metric("樓層淨利潤", f"${f_total_profit:,.0f}", delta=f"{(f_total_profit/f_rev*100) if f_rev>0 else 0:.1f}%")
                                 c5.metric("綜合工率", f"{f_efficiency:.2f}", help="所有項目數量總和 / 總工數")
                                 st.write("---")
-                            bldg_rev = building_data['累計產值'].sum(); bldg_labor = building_data['預估人力成本'].sum()
+                            bldg_rev = building_data['累計產值'].sum()
+                            # [fix] 棟別合計也用 report 層級工數
+                            bldg_report_workers = sum([wc for (b, f), wc in report_workers_map.items() if b == building])
+                            bldg_labor = bldg_report_workers * current_wage
                             bldg_mat = sum([cost for (b, f), cost in mat_cost_map.items() if b == building])
                             bldg_profit = bldg_rev - bldg_labor - bldg_mat
                             col_b1, col_b2, col_b3 = st.columns(3)
@@ -1428,12 +1449,19 @@ else:
                     if create_btn:
                         if new_project_name:
                             if create_project(new_project_name, copy_from if copy_option else None):
-                                st.success(f"已新增案場：{new_project_name}" + (f"（已複製 {copy_from} 的設定）" if copy_from else "")); st.rerun()
+                                st.success(f"已新增案場：{new_project_name}" + (f"（已複製 {copy_from} 的設定）" if copy_from else ""))
+                                st.session_state['manage_project'] = new_project_name
+                                st.rerun()
                             else: st.error("案場名稱已存在")
                         else: st.error("請輸入案場名稱")
             st.write("---")
+            # 重新讀取案場列表（新增後需要最新資料）
+            project_names = get_all_projects()
             if project_names:
-                selected_manage_project = st.selectbox("選擇要管理的案場", project_names, key="manage_project")
+                default_idx = 0
+                if 'manage_project' in st.session_state and st.session_state['manage_project'] in project_names:
+                    default_idx = project_names.index(st.session_state['manage_project'])
+                selected_manage_project = st.selectbox("選擇要管理的案場", project_names, index=default_idx, key="manage_project")
                 if selected_manage_project:
                     st.write(f"{selected_manage_project}")
                     current_wage = get_project_wage(selected_manage_project)
@@ -1603,7 +1631,7 @@ else:
                 col_u1, col_u2, col_u3, col_u4 = st.columns([2, 1, 2, 1])
                 with col_u1: st.write(f"{username}")
                 with col_u2: st.write("管理員" if role == "admin" else "用戶")
-                with col_u3: st.write(f"{created_at[:10]}")
+                with col_u3: st.write(f"{created_at[:10] if created_at else '-'}")
                 with col_u4:
                     if username != st.session_state.username:
                         if st.button("刪除", key=f"del_user_{user_id}"):
